@@ -60,7 +60,15 @@ def extract_listunsub(msg):
 def from_domain(msg):
     frm = h(msg, "From").lower()
     m = re.search(r'@([a-z0-9\.\-]+\.[a-z]{2,})', frm)
-    return m.group(1) if m else frm
+    domain = m.group(1) if m else frm
+    
+    # Skip provider/masking domains and personal domains that are too broad
+    blocked_domains = {'duck.com', 'protonmail.com', 'gmail.com', 'yahoo.com', 'outlook.com', 'linehan.me.uk'}
+    if domain.lower() in blocked_domains:
+        logger.debug(f"Skipping blocked provider domain: {domain}")
+        return None
+    
+    return domain
 
 def subject_hint(msg):
     s = h(msg, "Subject").lower()
@@ -221,8 +229,12 @@ def main():
                             logger.debug(f"  Extracted List-Unsubscribe: {lu}")
                         else:
                             dom = from_domain(msg)
-                            header, key = "From", dom
-                            logger.debug(f"  Extracted From domain: {dom}")
+                            if dom:  # Skip if from_domain returns None (blocked provider)
+                                header, key = "From", dom
+                                logger.debug(f"  Extracted From domain: {dom}")
+                            else:
+                                logger.info(f"  Skipping UID {uid.decode() if isinstance(uid, bytes) else uid}: no extractable domain (blocked provider)")
+                                continue
 
                     if train == "Train/Travel":
                         sh = subject_hint(msg)
