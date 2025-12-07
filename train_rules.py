@@ -58,14 +58,29 @@ def extract_listunsub(msg):
     return None
 
 def from_domain(msg):
+    """Extract domain from From header, checking Duck-Original-From if From is from a blocked provider."""
     frm = h(msg, "From").lower()
     m = re.search(r'@([a-z0-9\.\-]+\.[a-z]{2,})', frm)
     domain = m.group(1) if m else frm
     
     # Skip provider/masking domains and personal domains that are too broad
     blocked_domains = {'duck.com', 'protonmail.com', 'gmail.com', 'yahoo.com', 'outlook.com', 'linehan.me.uk'}
+    
+    # If the From domain is blocked, try Duck-Original-From for duck.com emails
     if domain.lower() in blocked_domains:
-        logger.debug(f"Skipping blocked provider domain: {domain}")
+        logger.debug(f"From domain {domain} is blocked, checking for Duck-Original-From")
+        duck_original = h(msg, "Duck-Original-From").lower()
+        if duck_original:
+            m_original = re.search(r'@([a-z0-9\.\-]+\.[a-z]{2,})', duck_original)
+            if m_original:
+                original_domain = m_original.group(1)
+                logger.debug(f"Found Duck-Original-From domain: {original_domain}")
+                # Check if the original domain is also blocked
+                if original_domain.lower() not in blocked_domains:
+                    return original_domain
+                else:
+                    logger.debug(f"Duck-Original-From domain {original_domain} is also blocked")
+        logger.debug(f"No usable original domain found, skipping blocked provider domain: {domain}")
         return None
     
     return domain
