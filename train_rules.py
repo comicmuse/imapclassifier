@@ -57,33 +57,65 @@ def extract_listunsub(msg):
             return p.split("@")[-1]
     return None
 
-def from_domain(msg):
-    """Extract domain from From header, checking Duck-Original-From if From is from a blocked provider."""
+def from_domain(msg, rules=None):
+    """Extract email or domain from From header, checking Duck-Original-From if From is from a blocked provider.
+    
+    Returns full email address unless the domain already has a rule, then returns just the domain.
+    """
     frm = h(msg, "From").lower()
-    m = re.search(r'@([a-z0-9\.\-]+\.[a-z]{2,})', frm)
-    domain = m.group(1) if m else frm
+    
+    # Extract email address
+    email_match = re.search(r'([a-z0-9\.\-_]+@[a-z0-9\.\-]+\.[a-z]{2,})', frm)
+    if not email_match:
+        return None
+    
+    email_addr = email_match.group(1)
+    # Extract domain from email
+    domain_match = re.search(r'@([a-z0-9\.\-]+\.[a-z]{2,})', email_addr)
+    if not domain_match:
+        return None
+    domain = domain_match.group(1)
     
     # Skip provider/masking domains and personal domains that are too broad
     blocked_domains = {'duck.com', 'protonmail.com', 'gmail.com', 'yahoo.com', 'outlook.com', 'linehan.me.uk'}
     
     # If the From domain is blocked, try Duck-Original-From for duck.com emails
-    if domain.lower() in blocked_domains:
+    if domain in blocked_domains:
         logger.debug(f"From domain {domain} is blocked, checking for Duck-Original-From")
         duck_original = h(msg, "Duck-Original-From").lower()
         if duck_original:
-            m_original = re.search(r'@([a-z0-9\.\-]+\.[a-z]{2,})', duck_original)
-            if m_original:
-                original_domain = m_original.group(1)
-                logger.debug(f"Found Duck-Original-From domain: {original_domain}")
-                # Check if the original domain is also blocked
-                if original_domain.lower() not in blocked_domains:
-                    return original_domain
-                else:
-                    logger.debug(f"Duck-Original-From domain {original_domain} is also blocked")
-        logger.debug(f"No usable original domain found, skipping blocked provider domain: {domain}")
-        return None
+            email_match_original = re.search(r'([a-z0-9\.\-_]+@[a-z0-9\.\-]+\.[a-z]{2,})', duck_original)
+            if email_match_original:
+                email_addr = email_match_original.group(1)
+                domain_match_original = re.search(r'@([a-z0-9\.\-]+\.[a-z]{2,})', email_addr)
+                if domain_match_original:
+                    domain = domain_match_original.group(1)
+                    logger.debug(f"Found Duck-Original-From email: {email_addr}, domain: {domain}")
+                    # Check if the original domain is also blocked
+                    if domain not in blocked_domains:
+                        # Continue to check if we should use domain or full email
+                        pass
+                    else:
+                        logger.debug(f"Duck-Original-From domain {domain} is also blocked")
+                        return None
+            else:
+                logger.debug(f"No usable original email found, skipping blocked provider domain: {domain}")
+                return None
+        else:
+            logger.debug(f"No usable original domain found, skipping blocked provider domain: {domain}")
+            return None
     
-    return domain
+    # Check if domain already has a rule - if so, skip creating new rule
+    if rules:
+        for rule in rules.get("rules", []):
+            match = rule.get("match", {})
+            if match.get("From") == domain:
+                logger.debug(f"Domain {domain} already has a rule, skipping training")
+                return None
+    
+    # Otherwise, use full email address for more specific matching
+    logger.debug(f"No existing rule for domain {domain}, using full email: {email_addr}")
+    return email_addr
 
 def subject_hint(msg):
     s = h(msg, "Subject").lower()
@@ -243,7 +275,7 @@ def main():
                             header, key = "List-Unsubscribe", lu
                             logger.debug(f"  Extracted List-Unsubscribe: {lu}")
                         else:
-                            dom = from_domain(msg)
+                            dom = from_domain(msg, rules)
                             if dom:  # Skip if from_domain returns None (blocked provider)
                                 header, key = "From", dom
                                 logger.debug(f"  Extracted From domain: {dom}")
