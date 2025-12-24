@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ~/bin/filer.py
-import imaplib, email, email.utils, os, re, ssl, yaml, logging, signal, time, argparse, sys, json
+import imaplib, email, email.utils, os, re, yaml, logging, signal, time, argparse, json
 from urllib.parse import urlparse
 from email.parser import BytesParser
 from email.policy import default
