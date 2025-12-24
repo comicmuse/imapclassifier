@@ -136,7 +136,7 @@ def send_daily_summary(imap):
         # Delete any previous Daily Email Filing Summary messages
         try:
             imap.select('"INBOX"', readonly=False)
-            typ, data = imap.uid("SEARCH", None, 'SUBJECT "Daily Email Filing Summary"')
+            typ, data = imap.uid("SEARCH", None, 'SUBJECT', 'Daily Email Filing Summary')
             if typ == "OK" and data and data[0]:
                 old_summary_uids = data[0].split()
                 for uid in old_summary_uids:
