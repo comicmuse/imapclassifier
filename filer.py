@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # ~/bin/filer.py
-import imaplib, email, os, re, ssl, yaml, logging, signal, time, argparse, sys, json
+import imaplib, email, email.utils, os, re, ssl, yaml, logging, signal, time, argparse, sys, json
 from urllib.parse import urlparse
 from email.parser import BytesParser
 from email.policy import default
-from datetime import datetime, timedelta
-from pathlib import Path
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(
@@ -174,11 +173,16 @@ def check_and_send_daily_summary(imap):
     today = now.strftime("%Y-%m-%d")
     should_send = False
     
-    # Check if it's past 19:00
+    # Check if it's past 19:00 and we haven't sent today
     if now.hour >= DAILY_SUMMARY_HOUR:
-        # Check if we haven't sent today
         if stats["last_summary_date"] != today:
-            should_send = True
+            # Only send if there's actual data to report
+            total = stats["stats"]["delete"] + stats["stats"]["forward"] + stats["stats"]["mark_read"]
+            for count in stats["stats"]["move"].values():
+                total += count
+            
+            if total > 0:
+                should_send = True
     
     if should_send:
         logger.info("Time to send daily summary")
