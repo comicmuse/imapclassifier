@@ -21,6 +21,7 @@ Teach-by-moving: create simple deterministic rules by moving emails into `Train/
 * [Run with systemd (user services)](#run-with-systemd-user-services)
 * [Daily workflow (how you “train”)](#daily-workflow-how-you-train)
 * [TripIt forwarding notes](#tripit-forwarding-notes)
+* [Daily Summary Feature](#daily-summary-feature)
 * [Safety: Archive & AutoDelete](#safety-archive--autodelete)
 * [Troubleshooting](#troubleshooting)
 * [Extending / Customising](#extending--customising)
@@ -216,7 +217,7 @@ After=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=%h/.config/systemd/user/imap.env
-ExecStart=/usr/bin/python3 %h/bin/filer.py --daemon
+ExecStart=/usr/bin/python3 %h/bin/filer.py
 Restart=always
 RestartSec=30
 
@@ -313,6 +314,44 @@ journalctl --user -u imap-trainer -f
 * The trainer forwards anything in `Train/Travel` **immediately** to `plans@tripit.com` (as a `message/rfc822` attachment) before filing it to `Travel/Flight Tickets` and marking read.
 * The filer will do the same for **new** matching travel mail in `INBOX`.
 * Make sure SMTP creds are valid in your environment file. If your provider needs specific SMTP ports, adjust `SMTP_HOST` or code.
+
+---
+
+## Daily Summary Feature
+
+The filer tracks email filing actions and sends a daily summary report at 19:00 (local time).
+
+**What's tracked:**
+* Emails moved to each destination folder
+* Emails deleted
+* Emails forwarded
+* Emails marked as read
+
+**How it works:**
+1. Every action (move, delete, forward, mark_read) is recorded to `~/.imap-filer-stats.json`
+2. The state file uses atomic writes (write to `.tmp`, then rename) for crash safety
+3. At 19:00 each day, a summary email is placed in your INBOX with statistics from the last 24 hours
+4. The summary email is marked as `\Seen` so it won't be processed by rules
+5. Statistics are reset after sending the summary
+
+**Example summary email:**
+
+```
+Daily Email Filing Summary - 2025-12-24
+
+Total emails processed: 105
+
+Emails moved by destination:
+  Finance: 12
+  Newsletters: 45
+  Offers: 23
+
+Emails deleted: 8
+Emails forwarded: 2
+Emails marked as read: 15
+```
+
+The state file survives daemon crashes and restarts, ensuring accurate tracking across system events.
 
 ---
 
