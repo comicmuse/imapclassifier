@@ -330,7 +330,7 @@ The filer tracks email filing actions and sends a daily summary report at 19:00 
 **How it works:**
 1. Every action (move, delete, forward, mark_read) is recorded to `~/.imap-filer-stats.json`
 2. The state file uses atomic writes (write to `.tmp`, then rename) for crash safety
-3. At 19:00 each day, a summary email is placed in your INBOX with statistics from the last 24 hours
+3. At 19:00 each day, a summary email is placed in your INBOX with statistics collected since the last summary was sent (i.e., since stats were last reset). If the filer has been down for one or more days, the summary may cover more than 24 hours.
 4. Any previous Daily Summary emails in INBOX are automatically deleted before sending the new one
 5. The summary email appears as **unread** so you'll notice it
 6. Statistics are reset after sending the summary
