@@ -133,6 +133,21 @@ def generate_summary_email():
 def send_daily_summary(imap):
     """Send daily summary email via IMAP APPEND"""
     try:
+        # Delete any previous Daily Email Filing Summary messages
+        try:
+            imap.select('"INBOX"', readonly=False)
+            typ, data = imap.uid("SEARCH", None, 'SUBJECT "Daily Email Filing Summary"')
+            if typ == "OK" and data and data[0]:
+                old_summary_uids = data[0].split()
+                for uid in old_summary_uids:
+                    imap.uid("STORE", uid, "+FLAGS", r"(\Deleted)")
+                    logger.debug(f"Marked old summary UID {uid.decode() if isinstance(uid, bytes) else uid} for deletion")
+                if old_summary_uids:
+                    imap.expunge()
+                    logger.info(f"Deleted {len(old_summary_uids)} previous Daily Summary email(s)")
+        except Exception as e:
+            logger.warning(f"Error deleting old summaries: {e}")
+        
         body, today = generate_summary_email()
         
         # Create email message
@@ -146,8 +161,8 @@ def send_daily_summary(imap):
         # Convert to bytes
         msg_bytes = msg.as_bytes()
         
-        # Append to INBOX with \Seen flag
-        imap.append('"INBOX"', r'(\Seen)', None, msg_bytes)
+        # Append to INBOX without \Seen flag (keeps it unread)
+        imap.append('"INBOX"', None, None, msg_bytes)
         logger.info(f"Daily summary email sent for {today}")
         
         # Reset stats
