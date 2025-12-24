@@ -305,31 +305,3 @@ Environment variables required:
         # One-shot mode (original behavior)
         main()
 
-"""
-Sample systemd service file for running filer.py as a daemon:
-
-Save as: ~/.config/systemd/user/imap-filer.service
-
-[Unit]
-Description=IMAP Filer Daemon (rules -> INBOX)
-After=network-online.target
-
-[Service]
-Type=simple
-EnvironmentFile=%h/.config/systemd/user/imap.env
-ExecStart=/usr/bin/python3 %h/bin/filer.py --daemon
-Restart=always
-RestartSec=30
-
-[Install]
-WantedBy=default.target
-
-Then enable and start with:
-  systemctl --user daemon-reload
-  systemctl --user enable --now imap-filer.service
-  loginctl enable-linger "$USER"
-
-View logs with:
-  journalctl --user -u imap-filer -f
-"""
-
