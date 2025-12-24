@@ -22,13 +22,19 @@ IMAP_PASS = os.getenv("IMAP_PASS")
 
 RULES_FILE = os.path.expanduser("~/.imap-rules.yaml")
 
+# Daemon configuration
+POLL_INTERVAL_SECONDS = 60
+
 # Global flag for graceful shutdown
 shutdown_requested = False
 
 def signal_handler(signum, frame):
     """Handle shutdown signals gracefully"""
     global shutdown_requested
-    sig_name = signal.Signals(signum).name
+    try:
+        sig_name = signal.Signals(signum).name
+    except (ValueError, AttributeError):
+        sig_name = f"signal {signum}"
     logger.info(f"Received {sig_name}, initiating graceful shutdown...")
     shutdown_requested = True
 
@@ -274,7 +280,7 @@ Environment variables required:
     signal.signal(signal.SIGINT, signal_handler)
     
     if args.daemon:
-        logger.info("Starting filer in daemon mode (polling every 60 seconds)...")
+        logger.info(f"Starting filer in daemon mode (polling every {POLL_INTERVAL_SECONDS} seconds)...")
         logger.info("Press Ctrl+C or send SIGTERM to stop")
         
         while not shutdown_requested:
@@ -287,9 +293,9 @@ Environment variables required:
                 logger.exception(f"Error in daemon loop: {e}")
             
             if not shutdown_requested:
-                logger.info("Sleeping for 60 seconds until next poll...")
+                logger.info(f"Sleeping for {POLL_INTERVAL_SECONDS} seconds until next poll...")
                 # Sleep in small increments to allow quick shutdown
-                for _ in range(60):
+                for _ in range(POLL_INTERVAL_SECONDS):
                     if shutdown_requested:
                         break
                     time.sleep(1)
