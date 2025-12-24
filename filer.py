@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # ~/bin/filer.py
-import imaplib, email, os, re, ssl, yaml, logging, signal, time, argparse, sys
+import imaplib, email, email.utils, os, re, yaml, logging, signal, time, argparse, json
 from urllib.parse import urlparse
 from email.parser import BytesParser
 from email.policy import default
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(
@@ -21,9 +22,11 @@ IMAP_USER = os.getenv("IMAP_USER")
 IMAP_PASS = os.getenv("IMAP_PASS")
 
 RULES_FILE = os.path.expanduser("~/.imap-rules.yaml")
+STATS_FILE = os.path.expanduser("~/.imap-filer-stats.json")
 
 # Daemon configuration
 POLL_INTERVAL_SECONDS = 60
+DAILY_SUMMARY_HOUR = 19  # 19:00 local time
 
 # Global flag for graceful shutdown
 shutdown_requested = False
@@ -37,6 +40,170 @@ def signal_handler(signum, frame):
         sig_name = f"signal {signum}"
     logger.info(f"Received {sig_name}, initiating graceful shutdown...")
     shutdown_requested = True
+
+def load_stats():
+    """Load statistics from disk"""
+    if not os.path.exists(STATS_FILE):
+        return {
+            "last_summary_date": None,
+            "stats": {
+                "move": {},
+                "delete": 0,
+                "forward": 0,
+                "mark_read": 0
+            }
+        }
+    try:
+        with open(STATS_FILE, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"Error loading stats file: {e}")
+        return {
+            "last_summary_date": None,
+            "stats": {
+                "move": {},
+                "delete": 0,
+                "forward": 0,
+                "mark_read": 0
+            }
+        }
+
+def save_stats(stats):
+    """Save statistics to disk atomically"""
+    try:
+        # Write to temporary file first
+        temp_file = STATS_FILE + ".tmp"
+        with open(temp_file, 'w') as f:
+            json.dump(stats, f, indent=2)
+        # Atomic rename
+        os.replace(temp_file, STATS_FILE)
+    except Exception as e:
+        logger.error(f"Error saving stats file: {e}")
+
+def update_stats(action_name, action_arg=None):
+    """Update statistics for an action"""
+    stats = load_stats()
+    
+    if action_name == "move":
+        dest = action_arg
+        if dest:
+            if dest not in stats["stats"]["move"]:
+                stats["stats"]["move"][dest] = 0
+            stats["stats"]["move"][dest] += 1
+    elif action_name in ["delete", "forward", "mark_read"]:
+        stats["stats"][action_name] += 1
+    
+    save_stats(stats)
+
+def generate_summary_email():
+    """Generate the daily summary email content"""
+    stats = load_stats()
+    today = datetime.now().strftime("%Y-%m-%d")
+    
+    # Calculate total emails processed
+    total = stats["stats"]["delete"] + stats["stats"]["forward"] + stats["stats"]["mark_read"]
+    for count in stats["stats"]["move"].values():
+        total += count
+    
+    # Build email body
+    body_lines = [
+        f"Daily Email Filing Summary - {today}",
+        "",
+        f"Total emails processed: {total}",
+        ""
+    ]
+    
+    if stats["stats"]["move"]:
+        body_lines.append("Emails moved by destination:")
+        for folder, count in sorted(stats["stats"]["move"].items()):
+            body_lines.append(f"  {folder}: {count}")
+        body_lines.append("")
+    
+    if stats["stats"]["delete"] > 0:
+        body_lines.append(f"Emails deleted: {stats['stats']['delete']}")
+    
+    if stats["stats"]["forward"] > 0:
+        body_lines.append(f"Emails forwarded: {stats['stats']['forward']}")
+    
+    if stats["stats"]["mark_read"] > 0:
+        body_lines.append(f"Emails marked as read: {stats['stats']['mark_read']}")
+    
+    return "\n".join(body_lines), today
+
+def send_daily_summary(imap):
+    """Send daily summary email via IMAP APPEND"""
+    try:
+        # Delete any previous Daily Email Filing Summary messages
+        try:
+            imap.select('"INBOX"', readonly=False)
+            typ, data = imap.uid("SEARCH", None, 'SUBJECT', 'Daily Email Filing Summary')
+            if typ == "OK" and data and data[0]:
+                old_summary_uids = data[0].split()
+                for uid in old_summary_uids:
+                    imap.uid("STORE", uid, "+FLAGS", r"(\Deleted)")
+                    logger.debug(f"Marked old summary UID {uid.decode() if isinstance(uid, bytes) else uid} for deletion")
+                if old_summary_uids:
+                    imap.expunge()
+                    logger.info(f"Deleted {len(old_summary_uids)} previous Daily Summary email(s)")
+        except Exception as e:
+            logger.warning(f"Error deleting old summaries: {e}")
+        
+        body, today = generate_summary_email()
+        
+        # Create email message
+        from email.mime.text import MIMEText
+        msg = MIMEText(body)
+        msg["Subject"] = f"Daily Email Filing Summary - {today}"
+        msg["From"] = IMAP_USER
+        msg["To"] = IMAP_USER
+        msg["Date"] = email.utils.formatdate(localtime=True)
+        
+        # Convert to bytes
+        msg_bytes = msg.as_bytes()
+        
+        # Append to INBOX without \Seen flag (keeps it unread), but mark with a custom flag
+        # so that filing rules or the main loop can exclude these summary messages.
+        imap.append('"INBOX"', 'DailySummary', None, msg_bytes)
+        logger.info(f"Daily summary email sent for {today}")
+        
+        # Reset stats
+        stats = load_stats()
+        stats["last_summary_date"] = today
+        stats["stats"] = {
+            "move": {},
+            "delete": 0,
+            "forward": 0,
+            "mark_read": 0
+        }
+        save_stats(stats)
+        
+    except Exception as e:
+        logger.error(f"Error sending daily summary: {e}")
+
+def check_and_send_daily_summary(imap):
+    """Check if it's time to send daily summary (19:00)"""
+    now = datetime.now()
+    stats = load_stats()
+    
+    # Check if we should send summary
+    today = now.strftime("%Y-%m-%d")
+    should_send = False
+    
+    # Check if it's past 19:00 and we haven't sent today
+    if now.hour >= DAILY_SUMMARY_HOUR:
+        if stats["last_summary_date"] != today:
+            # Only send if there's actual data to report
+            total = stats["stats"]["delete"] + stats["stats"]["forward"] + stats["stats"]["mark_read"]
+            for count in stats["stats"]["move"].values():
+                total += count
+            
+            if total > 0:
+                should_send = True
+    
+    if should_send:
+        logger.info("Time to send daily summary")
+        send_daily_summary(imap)
+
 
 def load_rules():
     try:
@@ -151,6 +318,7 @@ def do_action(imap, uid, raw, action):
         if name == "mark_read":
             imap.uid("STORE", uid, "+FLAGS", r"(\Seen)")
             logger.info(f"  [UID {uid.decode() if isinstance(uid, bytes) else uid}] Marked as read")
+            update_stats("mark_read")
         elif name == "move":
             dest = arg
             ensure_mailbox(imap, dest)
@@ -176,14 +344,17 @@ def do_action(imap, uid, raw, action):
                     logger.error(f"  [UID {uid.decode() if isinstance(uid, bytes) else uid}] Failed to copy to {dest}: {e2}")
             # mark original for deletion (move semantics)
             imap.uid("STORE", uid, "+FLAGS", r"(\Deleted)")
+            update_stats("move", dest)
         elif name == "forward":
             if raw is None:
                 typ, d = imap.uid("FETCH", uid, "(BODY.PEEK[])")  # full message without setting \Seen
                 raw = d[0][1] if d and d[0] else b""
             send_forward(raw, arg)
+            update_stats("forward")
         elif name == "delete":
             imap.uid("STORE", uid, "+FLAGS", r"(\Deleted)")
             logger.info(f"  [UID {uid.decode() if isinstance(uid, bytes) else uid}] Marked for deletion")
+            update_stats("delete")
         else:
             logger.warning(f"  [UID {uid.decode() if isinstance(uid, bytes) else uid}] Unknown action: {name}")
     except Exception as e:
@@ -244,6 +415,10 @@ def main():
 
         logger.info(f"Processed {processed} messages, expunging...")
         imap.expunge()
+        
+        # Check if it's time to send daily summary (daemon mode)
+        check_and_send_daily_summary(imap)
+        
         imap.logout()
         logger.info("Filer completed successfully")
         
@@ -254,24 +429,16 @@ def main():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="IMAP Filer - Apply rules to INBOX messages",
+        description="IMAP Filer - Apply rules to INBOX messages (daemon mode only)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run once and exit (one-shot mode, default):
-  python3 filer.py
-  
   # Run as daemon, polling every 60 seconds:
-  python3 filer.py --daemon
+  python3 filer.py
   
 Environment variables required:
   IMAP_HOST, IMAP_USER, IMAP_PASS
         """
-    )
-    parser.add_argument(
-        '--daemon',
-        action='store_true',
-        help='Run in daemon mode, polling every 60 seconds (default: one-shot mode)'
     )
     args = parser.parse_args()
     
@@ -279,29 +446,26 @@ Environment variables required:
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
     
-    if args.daemon:
-        logger.info(f"Starting filer in daemon mode (polling every {POLL_INTERVAL_SECONDS} seconds)...")
-        logger.info("Press Ctrl+C or send SIGTERM to stop")
+    # Always run in daemon mode
+    logger.info(f"Starting filer in daemon mode (polling every {POLL_INTERVAL_SECONDS} seconds)...")
+    logger.info("Press Ctrl+C or send SIGTERM to stop")
+    
+    while not shutdown_requested:
+        try:
+            main()
+        except KeyboardInterrupt:
+            logger.info("Keyboard interrupt received, shutting down...")
+            break
+        except Exception as e:
+            logger.exception(f"Error in daemon loop: {e}")
         
-        while not shutdown_requested:
-            try:
-                main()
-            except KeyboardInterrupt:
-                logger.info("Keyboard interrupt received, shutting down...")
-                break
-            except Exception as e:
-                logger.exception(f"Error in daemon loop: {e}")
-            
-            if not shutdown_requested:
-                logger.info(f"Sleeping for {POLL_INTERVAL_SECONDS} seconds until next poll...")
-                # Sleep in small increments to allow quick shutdown
-                for _ in range(POLL_INTERVAL_SECONDS):
-                    if shutdown_requested:
-                        break
-                    time.sleep(1)
-        
-        logger.info("Daemon shutdown complete")
-    else:
-        # One-shot mode (original behavior)
-        main()
+        if not shutdown_requested:
+            logger.info(f"Sleeping for {POLL_INTERVAL_SECONDS} seconds until next poll...")
+            # Sleep in small increments to allow quick shutdown
+            for _ in range(POLL_INTERVAL_SECONDS):
+                if shutdown_requested:
+                    break
+                time.sleep(1)
+    
+    logger.info("Daemon shutdown complete")
 
