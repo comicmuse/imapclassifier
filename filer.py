@@ -161,8 +161,9 @@ def send_daily_summary(imap):
         # Convert to bytes
         msg_bytes = msg.as_bytes()
         
-        # Append to INBOX without \Seen flag (keeps it unread)
-        imap.append('"INBOX"', None, None, msg_bytes)
+        # Append to INBOX without \Seen flag (keeps it unread), but mark with a custom flag
+        # so that filing rules or the main loop can exclude these summary messages.
+        imap.append('"INBOX"', 'DailySummary', None, msg_bytes)
         logger.info(f"Daily summary email sent for {today}")
         
         # Reset stats
