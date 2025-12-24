@@ -210,13 +210,13 @@ User services live in `~/.config/systemd/user/`. Manage them with `systemctl --u
 
 ```
 [Unit]
-Description=IMAP Filer (rules -> INBOX)
+Description=IMAP Filer Daemon (rules -> INBOX)
 After=network-online.target
 
 [Service]
 Type=simple
 EnvironmentFile=%h/.config/systemd/user/imap.env
-ExecStart=/usr/bin/python3 %h/bin/filer.py
+ExecStart=/usr/bin/python3 %h/bin/filer.py --daemon
 Restart=always
 RestartSec=30
 

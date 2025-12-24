@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ~/bin/filer.py
-import imaplib, email, os, re, ssl, yaml, logging
+import imaplib, email, os, re, ssl, yaml, logging, signal, time, argparse, sys
 from urllib.parse import urlparse
 from email.parser import BytesParser
 from email.policy import default
@@ -21,6 +21,22 @@ IMAP_USER = os.getenv("IMAP_USER")
 IMAP_PASS = os.getenv("IMAP_PASS")
 
 RULES_FILE = os.path.expanduser("~/.imap-rules.yaml")
+
+# Daemon configuration
+POLL_INTERVAL_SECONDS = 60
+
+# Global flag for graceful shutdown
+shutdown_requested = False
+
+def signal_handler(signum, frame):
+    """Handle shutdown signals gracefully"""
+    global shutdown_requested
+    try:
+        sig_name = signal.Signals(signum).name
+    except (ValueError, AttributeError):
+        sig_name = f"signal {signum}"
+    logger.info(f"Received {sig_name}, initiating graceful shutdown...")
+    shutdown_requested = True
 
 def load_rules():
     try:
@@ -237,5 +253,55 @@ def main():
         logger.exception(f"Filer error: {e}")
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(
+        description="IMAP Filer - Apply rules to INBOX messages",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Run once and exit (one-shot mode, default):
+  python3 filer.py
+  
+  # Run as daemon, polling every 60 seconds:
+  python3 filer.py --daemon
+  
+Environment variables required:
+  IMAP_HOST, IMAP_USER, IMAP_PASS
+        """
+    )
+    parser.add_argument(
+        '--daemon',
+        action='store_true',
+        help='Run in daemon mode, polling every 60 seconds (default: one-shot mode)'
+    )
+    args = parser.parse_args()
+    
+    # Set up signal handlers for graceful shutdown
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    
+    if args.daemon:
+        logger.info(f"Starting filer in daemon mode (polling every {POLL_INTERVAL_SECONDS} seconds)...")
+        logger.info("Press Ctrl+C or send SIGTERM to stop")
+        
+        while not shutdown_requested:
+            try:
+                main()
+            except KeyboardInterrupt:
+                logger.info("Keyboard interrupt received, shutting down...")
+                break
+            except Exception as e:
+                logger.exception(f"Error in daemon loop: {e}")
+            
+            if not shutdown_requested:
+                logger.info(f"Sleeping for {POLL_INTERVAL_SECONDS} seconds until next poll...")
+                # Sleep in small increments to allow quick shutdown
+                for _ in range(POLL_INTERVAL_SECONDS):
+                    if shutdown_requested:
+                        break
+                    time.sleep(1)
+        
+        logger.info("Daemon shutdown complete")
+    else:
+        # One-shot mode (original behavior)
+        main()
 
