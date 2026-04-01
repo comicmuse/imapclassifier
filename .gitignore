@@ -5,3 +5,4 @@ __pycache__/
 *.pyd
 .imap-filer-stats.json
 .imap-filer-stats.json.tmp
+.env

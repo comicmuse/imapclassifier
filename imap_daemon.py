@@ -24,6 +24,9 @@ STATS_FILE = os.path.expanduser("~/.imap-daemon-stats.json")
 POLL_INTERVAL = 60      # seconds between filing passes
 TRAIN_INTERVAL = 3600   # seconds between training cycles
 DAILY_SUMMARY_HOUR = 19
+OFFERS_FOLDER = "Offers"
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://192.168.1.154:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
 
 TRAIN_MAP = {
     "Train/Newsletters": [("move", "Newsletters")],
@@ -122,13 +125,13 @@ def save_rules(data):
 
 def load_stats():
     if not os.path.exists(STATS_FILE):
-        return {"last_summary_date": None, "stats": {"move": {}, "delete": 0, "forward": 0, "mark_read": 0}}
+        return {"last_summary_date": None, "last_offers_cleanup_date": None, "stats": {"move": {}, "delete": 0, "forward": 0, "mark_read": 0}}
     try:
         with open(STATS_FILE) as f:
             return json.load(f)
     except Exception as e:
         logger.error(f"Error loading stats: {e}")
-        return {"last_summary_date": None, "stats": {"move": {}, "delete": 0, "forward": 0, "mark_read": 0}}
+        return {"last_summary_date": None, "last_offers_cleanup_date": None, "stats": {"move": {}, "delete": 0, "forward": 0, "mark_read": 0}}
 
 def save_stats(stats):
     try:
@@ -405,6 +408,106 @@ def upsert_rule(data, header, contains, actions):
     data["rules"].append({"match": {"header": header, "contains": contains}, "actions": actions})
 
 
+# ─── Offers cleanup ───────────────────────────────────────────────────────────
+
+def _extract_text(msg):
+    text_parts = []
+    for part in msg.walk():
+        ct = part.get_content_type()
+        if ct == "text/plain":
+            payload = part.get_payload(decode=True)
+            charset = part.get_content_charset() or "utf-8"
+            text_parts.append(payload.decode(charset, errors="ignore"))
+        elif ct == "text/html" and not text_parts:
+            import html as html_mod
+            payload = part.get_payload(decode=True)
+            charset = part.get_content_charset() or "utf-8"
+            html = payload.decode(charset, errors="ignore")
+            # Strip <style> and <script> blocks entirely before tag removal
+            html = re.sub(r"<style[^>]*>.*?</style>", " ", html, flags=re.DOTALL | re.IGNORECASE)
+            html = re.sub(r"<script[^>]*>.*?</script>", " ", html, flags=re.DOTALL | re.IGNORECASE)
+            text = re.sub(r"<[^>]+>", " ", html)
+            # Decode HTML entities, strip invisible chars and long URLs
+            text = html_mod.unescape(text)
+            text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\u00ad\u034f\u200b-\u200f\u2028\u2029\ufeff]", "", text)
+            text = re.sub(r"https?://\S{60,}", "", text)
+            text_parts.append(text)
+    return " ".join(text_parts)
+
+def _parse_offer_end_date(text):
+    import urllib.request, json
+    import datetime as dt
+    today = dt.date.today()
+    prompt = (
+        f"Today is {today.isoformat()}. "
+        "Extract the expiry or end date of the offer from the text below. "
+        "Reply with ONLY the date in YYYY-MM-DD format. "
+        "If no expiry date is present, reply with 'none'.\n"
+        "Date formats you may encounter include: 'Ends 31 May', 'Ends 15th Jan', "
+        "'Ends 15-01-2026', 'until 30/03/2026', 'until 11.59pm on 28 March 2026', "
+        "'on or before 31 March 2026', 'Offer ends 30.03.26'.\n\n"
+        f"{text[:3000]}"
+    )
+    payload = json.dumps({"model": OLLAMA_MODEL, "prompt": prompt, "stream": False}).encode()
+    req = urllib.request.Request(
+        f"{OLLAMA_URL}/api/generate",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            response_text = json.loads(resp.read())["response"].strip()
+        if response_text.lower().startswith("none"):
+            return None
+        m = re.search(r"\d{4}-\d{2}-\d{2}", response_text)
+        if m:
+            return dt.datetime.strptime(m.group(), "%Y-%m-%d").date()
+    except Exception as e:
+        logger.warning(f"Ollama date extraction failed: {e}")
+    return None
+
+def run_offers_cleanup_cycle(imap):
+    from datetime import date
+    today = date.today()
+    typ, _ = imap.select(f'"{OFFERS_FOLDER}"', readonly=False)
+    if typ != "OK":
+        logger.warning(f"Could not select {OFFERS_FOLDER}")
+        return
+
+    typ, data = imap.uid("SEARCH", None, "UNSEEN")
+    uids = data[0].split() if data and data[0] else []
+    logger.info(f"Offers cleanup: {len(uids)} unread messages to scan")
+
+    marked = 0
+    for uid in uids:
+        typ, d = imap.uid("FETCH", uid, "(BODY.PEEK[])")
+        if typ != "OK" or not d or not d[0]:
+            continue
+        msg = email.message_from_bytes(d[0][1])
+        subject = h(msg, "Subject")
+        text = _extract_text(msg)
+        end_date = _parse_offer_end_date(text)
+        uid_str = uid.decode() if isinstance(uid, bytes) else uid
+        if end_date and end_date < today:
+            imap.uid("STORE", uid, "+FLAGS", r"(\Seen)")
+            logger.info(f"  [UID {uid_str}] Expired {end_date}: {subject[:60]}")
+            marked += 1
+        else:
+            logger.debug(f"  [UID {uid_str}] date={end_date}: {subject[:60]}")
+
+    logger.info(f"Offers cleanup complete: marked {marked} expired offer(s) as read")
+
+def check_and_run_offers_cleanup(imap):
+    from datetime import datetime
+    stats = load_stats()
+    today = datetime.now().strftime("%Y-%m-%d")
+    if stats.get("last_offers_cleanup_date") != today:
+        run_offers_cleanup_cycle(imap)
+        stats = load_stats()
+        stats["last_offers_cleanup_date"] = today
+        save_stats(stats)
+
+
 # ─── Cycle functions ──────────────────────────────────────────────────────────
 
 def run_training_cycle(imap):
@@ -509,6 +612,7 @@ def run_filing_cycle(imap, rules):
     logger.info(f"Filing cycle: processed {processed} messages, expunging...")
     imap.expunge()
     check_and_send_daily_summary(imap)
+    check_and_run_offers_cleanup(imap)
 
 
 # ─── Main / CLI ───────────────────────────────────────────────────────────────
