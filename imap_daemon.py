@@ -25,7 +25,7 @@ POLL_INTERVAL = 60      # seconds between filing passes
 TRAIN_INTERVAL = 3600   # seconds between training cycles
 DAILY_SUMMARY_HOUR = 19
 OFFERS_FOLDER = "Offers"
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://192.168.1.154:11434")
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
 
 TRAIN_MAP = {
