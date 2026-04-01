@@ -1,4 +1,4 @@
-# IMAP Trainer & Filer
+# IMAP Daemon
 
 Teach-by-moving: create simple deterministic rules by moving emails into `Train/*` folders from **any** client (Thunderbird on Linux/Android, etc.). A local trainer learns from those examples and updates a rules file. A filer applies those rules to `INBOX` (move/mark-read/forward). No webmail or server-side Sieve editing required.
 
@@ -101,13 +101,10 @@ Train/AutoDelete    → move to Autodelete/ (see Safety)
 ## Files in this repo
 
 ```
-filer.py           # applies rules to INBOX (continuous)
-train_rules.py     # learns rules from Train/* (hourly)
+imap_daemon.py     # single daemon: trains rules and files INBOX
 
-~/config/systemd/user/
-  imap-filer.service
-  imap-trainer.service
-  imap-trainer.timer
+~/.config/systemd/user/
+  imap-daemon.service
 ```
 
 You can keep the rules/config in your home as well (defaults used by scripts):
@@ -200,24 +197,19 @@ Train/Travel:
 
 User services live in `~/.config/systemd/user/`. Manage them with `systemctl --user …`.
 
-**Services & timer:**
+A single service handles both training (every hour) and filing (every 60 seconds).
 
-* `imap-filer.service` – runs continuously
-* `imap-trainer.service` – one-shot; paired with `imap-trainer.timer`
-
-**Example unit files** (adjust paths as needed):
-
-**`~/.config/systemd/user/imap-filer.service`**
+**`~/.config/systemd/user/imap-daemon.service`**
 
 ```
 [Unit]
-Description=IMAP Filer Daemon (rules -> INBOX)
+Description=IMAP Daemon (trains rules + files INBOX)
 After=network-online.target
 
 [Service]
 Type=simple
 EnvironmentFile=%h/.config/systemd/user/imap.env
-ExecStart=/usr/bin/python3 %h/bin/filer.py
+ExecStart=/usr/bin/python3 %h/bin/imap_daemon.py
 Restart=always
 RestartSec=30
 
@@ -225,72 +217,21 @@ RestartSec=30
 WantedBy=default.target
 ```
 
-**`~/.config/systemd/user/imap-trainer.service`**
-
-```
-[Unit]
-Description=IMAP Trainer (stateless)
-After=network-online.target
-
-[Service]
-Type=oneshot
-EnvironmentFile=%h/.config/systemd/user/imap.env
-ExecStart=/usr/bin/python3 %h/bin/train_rules.py
-```
-
-**Hourly timer** (choose one style):
-
-* Drift-based (**run every 60 minutes after last run finished**):
-
-  **`~/.config/systemd/user/imap-trainer.timer`**
-
-  ```
-  [Unit]
-  Description=Run IMAP Trainer every hour
-
-  [Timer]
-  OnBootSec=5min
-  OnUnitActiveSec=60min
-  Unit=imap-trainer.service
-
-  [Install]
-  WantedBy=timers.target
-  ```
-
-* Wall-clock (**top of the hour**, catches up after reboot):
-
-  **`~/.config/systemd/user/imap-trainer.timer`**
-
-  ```
-  [Unit]
-  Description=Run IMAP Trainer hourly (wall clock)
-
-  [Timer]
-  OnCalendar=hourly
-  Persistent=true
-  Unit=imap-trainer.service
-
-  [Install]
-  WantedBy=timers.target
-  ```
-
 **Enable & start:**
 
 ```bash
 systemctl --user daemon-reload
-systemctl --user enable --now imap-filer.service
-systemctl --user enable --now imap-trainer.timer
+systemctl --user enable --now imap-daemon.service
 
 # allow user services to run without a logged-in session
 loginctl enable-linger "$USER"
 ```
 
-**Inspect timers & logs:**
+**Inspect logs:**
 
 ```bash
-systemctl --user list-timers --all
-journalctl --user -u imap-filer -f
-journalctl --user -u imap-trainer -f
+journalctl --user -u imap-daemon -f
+tail -f ~/.imap-daemon.log
 ```
 
 ---
@@ -300,7 +241,7 @@ journalctl --user -u imap-trainer -f
 1. On desktop or phone, move a message to one of:
 
    * `Train/Newsletters`, `Train/Offers`, `Train/Receipts`, `Train/Travel`, `Train/Archive`, `Train/AutoDelete`.
-2. The trainer (hourly) empties those queues:
+2. The daemon's training cycle (every hour) empties those queues:
 
    * Extracts a stable key: `List-Id` → `List-Unsubscribe` → `From` domain (for Travel also checks Subject hints)
    * Updates `~/.imap-rules.yaml` (atomic write)
@@ -328,7 +269,7 @@ The filer tracks email filing actions and sends a daily summary report at 19:00 
 * Emails marked as read
 
 **How it works:**
-1. Every action (move, delete, forward, mark_read) is recorded to `~/.imap-filer-stats.json`
+1. Every action (move, delete, forward, mark_read) is recorded to `~/.imap-daemon-stats.json`
 2. The state file uses atomic writes (write to `.tmp`, then rename) for crash safety
 3. At 19:00 each day, a summary email is placed in your INBOX with statistics collected since the last summary was sent (i.e., since stats were last reset). If the filer has been down for one or more days, the summary may cover more than 24 hours.
 4. Any previous Daily Summary emails in INBOX are automatically deleted before sending the new one
@@ -367,8 +308,8 @@ The state file survives daemon crashes and restarts, ensuring accurate tracking 
 
 ## Troubleshooting
 
-* **Service won’t start**: `journalctl --user -u imap-filer -e` and `journalctl --user -u imap-trainer -e`.
-* **Nothing happens**: Confirm `~/.imap-rules.yaml` exists and contains at least one rule; run the trainer once manually: `IMAP_USER=… IMAP_PASS=… python3 ~/bin/train_rules.py`.
+* **Service won’t start**: `journalctl --user -u imap-daemon -e`.
+* **Nothing happens**: Confirm `~/.imap-rules.yaml` exists and contains at least one rule; run the trainer once manually: `IMAP_USER=… IMAP_PASS=… python3 ~/bin/imap_daemon.py --mode train`.
 * **Folder names**: Some servers show localized names; use the exact server-side path. Adjust destinations in rules if needed.
 * **First-match wins**: If a general rule catches mail before a specific one, reorder rules (place specific ones earlier in the YAML).
 * **Character encoding**: The scripts decode common encodings; if you see garbled subjects/headers, file an issue or add a decoding fallback.
@@ -392,9 +333,9 @@ The state file survives daemon crashes and restarts, ensuring accurate tracking 
 
   Then update `match_rule` to evaluate `all` / `any` clauses. (A sample implementation is easy to drop in.)
 
-* **More Train folders**: Add any `Train/Foo` mapping you like by editing the `TRAIN_MAP` in `train_rules.py` and creating the destination folder.
+* **More Train folders**: Add any `Train/Foo` mapping you like by editing the `TRAIN_MAP` in `imap_daemon.py` and creating the destination folder.
 
-* **Alternative filing**: You can swap `filer.py` for `imapfilter` (Lua) or `imapautofilter` if you prefer, using the same rules file as input.
+* **Alternative filing**: You can swap `imap_daemon.py` for `imapfilter` (Lua) or `imapautofilter` if you prefer, using the same rules file as input.
 
 * **Layer ML later**: If you decide to add ML/LLM later, keep this deterministic pipeline and call the model only for “unknown” messages.
 
@@ -427,14 +368,11 @@ Yes—temporarily change actions in YAML to just add tags (or copy instead of mo
 ## Uninstall
 
 ```bash
-systemctl --user disable --now imap-filer.service
-systemctl --user disable --now imap-trainer.timer
-rm -f ~/.config/systemd/user/imap-filer.service \
-      ~/.config/systemd/user/imap-trainer.service \
-      ~/.config/systemd/user/imap-trainer.timer
+systemctl --user disable --now imap-daemon.service
+rm -f ~/.config/systemd/user/imap-daemon.service
 systemctl --user daemon-reload
 
-# optional: remove scripts and config
-rm -f ~/bin/filer.py ~/bin/train_rules.py
-rm -f ~/.imap-rules.yaml ~/.imap-subject-hints.yaml
+# optional: remove script and config
+rm -f ~/bin/imap_daemon.py
+rm -f ~/.imap-rules.yaml ~/.imap-subject-hints.yaml ~/.imap-daemon-stats.json
 ```
