@@ -587,9 +587,9 @@ def run_filing_cycle(imap, rules):
 
     imap.select('"INBOX"', readonly=False)
 
-    typ, data = imap.uid("SEARCH", None, "ALL")
+    typ, data = imap.uid("SEARCH", None, "UNSEEN")
     uids = data[0].split() if data and data[0] else []
-    logger.info(f"Found {len(uids)} messages in INBOX")
+    logger.info(f"Found {len(uids)} unread messages in INBOX")
 
     processed = 0
     for uid in uids:
