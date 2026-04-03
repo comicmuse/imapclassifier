@@ -593,17 +593,28 @@ def run_filing_cycle(imap, rules):
 
     processed = 0
     for uid in uids:
-        typ, d = imap.uid("FETCH", uid, "(BODY.PEEK[])")
+        uid_str = uid.decode() if isinstance(uid, bytes) else uid
+        typ, d = imap.uid("FETCH", uid, "(BODY.PEEK[HEADER])")
         if typ != "OK" or not d or not d[0]:
-            logger.debug(f"Skipping UID {uid.decode() if isinstance(uid, bytes) else uid}: fetch failed")
+            logger.debug(f"Skipping UID {uid_str}: fetch failed")
             continue
 
-        raw = d[0][1]
-        msg = email.message_from_bytes(raw)
+        msg = email.message_from_bytes(d[0][1])
 
         for rule_idx, rule in enumerate(rule_list, 1):
             if match_rule(msg, rule):
-                logger.info(f"UID {uid.decode() if isinstance(uid, bytes) else uid} matched rule {rule_idx}")
+                logger.info(f"UID {uid_str} matched rule {rule_idx}")
+                # Only fetch full body if an action needs it (move uses APPEND, forward sends it)
+                needs_body = any(
+                    (a if isinstance(a, str) else (next(iter(a)) if isinstance(a, dict) else a[0] if a else None))
+                    in ("move", "forward")
+                    for a in rule["actions"]
+                )
+                raw = None
+                if needs_body:
+                    typ2, d2 = imap.uid("FETCH", uid, "(BODY.PEEK[])")
+                    if typ2 == "OK" and d2 and d2[0]:
+                        raw = d2[0][1]
                 for a in rule["actions"]:
                     do_action(imap, uid, raw, a)
                 processed += 1
