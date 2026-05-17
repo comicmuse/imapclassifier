@@ -5,10 +5,9 @@ from email.header import decode_header, make_header
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler(),
         logging.FileHandler(os.path.expanduser("~/.imap-daemon.log"))
     ]
 )
